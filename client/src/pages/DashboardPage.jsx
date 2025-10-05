@@ -1,194 +1,178 @@
-// src/pages/DashboardPage.jsx
-import React, { Component } from 'react';
-import { useClimateData } from '../context/ClimateDataContext';
-import LocationSelector from '../components/input/LocationSelector';
-import DateSelector from '../components/input/DateSelector';
-import ParameterSelector from '../components/input/ParameterSelector';
-import RiskSummary from '../components/visualization/RiskSummary';
-import ProbabilityCharts from '../components/visualization/ProbabilityCharts';
-import HistoricalTrends from '../components/visualization/HistoricalTrends';
-import DataExport from '../components/data/DataExport';
+import React from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { Map, Marker } from "pigeon-maps";
 
-// ErrorBoundary component for catching render errors in child components
-class ErrorBoundary extends Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false };
-  }
+// --- CONFIGURATION ---
+const API_BASE_URL = 'https://spaceapps-challenge-flax.vercel.app/api/weather/likelihood';
 
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
+const TOP_CITIES = [
+  { name: 'Jammu', coords: [32.72, 74.87] },
+  { name: 'Mumbai', coords: [19.07, 72.87] },
+  { name: 'Delhi', coords: [28.70, 77.10] },
+  { name: 'New York, USA', coords: [40.71, -74.00] },
+  { name: 'Los Angeles, USA', coords: [34.05, -118.24] },
+  { name: 'London, UK', coords: [51.50, -0.12] },
+];
 
-  componentDidCatch(error, errorInfo) {
-    console.error(`Error in component ${this.props.fallbackName}:`, error, errorInfo);
-  }
+// --- HELPER FUNCTIONS ---
+const dateToDayOfYear = (dateString) => {
+  const date = new Date(dateString);
+  const start = new Date(date.getFullYear(), 0, 0);
+  const diff = (date - start) + ((start.getTimezoneOffset() - date.getTimezoneOffset()) * 60 * 1000);
+  const oneDay = 1000 * 60 * 60 * 24;
+  return Math.floor(diff / oneDay);
+};
 
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="p-5 bg-red-100 border border-red-600 rounded mb-4 text-red-700 font-semibold">
-          Component {this.props.fallbackName} failed to load. Please check the import.
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
+const getRiskIcon = (key) => {
+  const icons = {
+    very_hot: '🥵', very_cold: '🥶', very_wet: '💧',
+    very_windy: '💨', uncomfortable: '😩',
+  };
+  return icons[key] || '📊';
+};
 
-const SafeComponent = ({ component: Component, fallbackName, ...props }) => (
-  <ErrorBoundary fallbackName={fallbackName}>
-    <Component {...props} />
-  </ErrorBoundary>
+
+// --- UI COMPONENTS ---
+const Loader = () => (
+  <div className="flex flex-col items-center justify-center h-full py-10">
+    <div className="w-12 h-12 rounded-full animate-spin border-4 border-solid border-blue-500 border-t-transparent"></div>
+    <p className="mt-4 text-gray-600">Analyzing NASA Data...</p>
+  </div>
 );
 
-function DashboardPage() {
-  const {
-    location,
-    selectedDate,
-    parameters,
-    climateData,
-    loading,
-    error,
-    fetchClimateData,
-    setLocation,
-    setSelectedDate,
-    setParameters,
-  } = useClimateData();
+const ErrorDisplay = ({ message }) => (
+  <div className="p-4 bg-red-100 text-red-700 rounded-lg border border-red-300">
+    <strong>Error:</strong> {message}
+  </div>
+);
 
-  const handleAnalyze = () => {
-    if (location) {
-      fetchClimateData(location, selectedDate, parameters);
+const ResultsDisplay = ({ data }) => {
+  if (data.message) {
+    return <div className="p-4 bg-yellow-100 text-yellow-800 rounded-lg">{data.message}</div>;
+  }
+
+  return (
+    <div className="animate-fade-in space-y-3">
+      <p className="text-sm text-gray-600 pb-2">
+        Analysis based on <strong>{data.analysis.total_historical_days_analyzed}</strong> historical records for day <strong>{data.query.day_of_year}</strong>.
+      </p>
+      {Object.entries(data.analysis.likelihoods).map(([key, value]) => (
+        <div key={key} className="p-4 bg-gray-50 rounded-lg border border-gray-200 transition-all hover:shadow-md">
+          <div className="flex items-center mb-2">
+            <span className="text-3xl mr-3">{getRiskIcon(key)}</span>
+            <h3 className="text-lg font-semibold text-gray-800">{key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}</h3>
+          </div>
+          <p className="text-sm text-gray-600 mb-3">{value.description}</p>
+          <div title={`${(value.probability * 100).toFixed(0)}% Chance`} className="w-full bg-gray-200 rounded-full h-2.5">
+            <div className="bg-blue-600 h-2.5 rounded-full" style={{ width: `${value.probability * 100}%` }}></div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+
+// --- MAIN DASHBOARD COMPONENT ---
+function DashboardPage() {
+  const [location, setLocation] = useState(TOP_CITIES[0].coords);
+  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedCity, setSelectedCity] = useState(JSON.stringify(TOP_CITIES[0].coords));
+  
+  const [weatherData, setWeatherData] = useState(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchApiData = useCallback(async () => {
+    if (!location) return;
+    setIsLoading(true);
+    setError(null);
+
+    const [lat, lng] = location;
+    const dayOfYear = dateToDayOfYear(date);
+    const url = `${API_BASE_URL}?lat=${lat}&lon=${lng}&day_of_year=${dayOfYear}`;
+
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.message || 'An unknown error occurred.');
+      }
+      const data = await response.json();
+      setWeatherData(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setIsLoading(false);
     }
+  }, [location, date]);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      fetchApiData();
+    }, 500); // Debounce API calls
+    return () => clearTimeout(handler);
+  }, [fetchApiData]);
+
+  const handleCityChange = (e) => {
+    const coords = JSON.parse(e.target.value);
+    setSelectedCity(e.target.value);
+    setLocation(coords);
+  };
+
+  const handleMapClick = ({ latLng }) => {
+    setSelectedCity(''); // Deselect city dropdown
+    setLocation([parseFloat(latLng[0].toFixed(4)), parseFloat(latLng[1].toFixed(4))]);
   };
 
   return (
-    <div className="dashboard-page min-h-screen bg-gray-50 p-4 sm:p-8">
-      <div className="dashboard-layout max-w-7xl mx-auto flex flex-col md:flex-row gap-6">
-        {/* Input Sidebar */}
-        <aside className="input-sidebar md:w-80 bg-white p-6 rounded-lg shadow-md flex-shrink-0">
-          <SafeComponent
-            component={LocationSelector}
-            fallbackName="LocationSelector"
-            location={location}
-            onLocationChange={setLocation}
-          />
+    <div className="min-h-screen bg-gray-100 font-sans p-4 sm:p-6 md:p-8">
+      <div className="max-w-7xl mx-auto">
+        <header className="text-center mb-8">
+          <h1 className="text-3xl md:text-5xl font-bold text-gray-800">Climate Risk Dashboard</h1>
+          <p className="text-md md:text-lg text-gray-600 mt-2">Analyze adverse weather likelihood using historical NASA data</p>
+        </header>
 
-          <SafeComponent
-            component={DateSelector}
-            fallbackName="DateSelector"
-            selectedDate={selectedDate}
-            onDateChange={setSelectedDate}
-            className="mt-6"
-          />
-
-          <SafeComponent
-            component={ParameterSelector}
-            fallbackName="ParameterSelector"
-            selectedParams={parameters}
-            onParamsChange={setParameters}
-            className="mt-6"
-          />
-
-          <button
-            className={`mt-6 w-full py-3 rounded-lg text-white text-lg font-semibold transition-colors ${
-              !location || loading ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'
-            }`}
-            onClick={handleAnalyze}
-            disabled={!location || loading}
-          >
-            {loading ? 'Analyzing...' : 'Analyze Climate Probability'}
-          </button>
-        </aside>
-
-        {/* Main Visualization Area */}
-        <main className="visualization-area flex-grow bg-white p-6 rounded-lg shadow-md min-w-0">
-          {error && (
-            <div className="p-4 mb-6 bg-red-100 border border-red-600 rounded text-red-700 font-semibold">
-              <strong>Error:</strong> {error}
-            </div>
-          )}
-
-          {loading && (
-            <div className="text-center py-16">
-              <div className="mx-auto mb-5 w-10 h-10 border-4 border-gray-300 border-t-blue-600 rounded-full animate-spin"></div>
-              <p className="text-gray-700 text-lg">Loading climate data from NASA...</p>
-            </div>
-          )}
-
-          {!climateData && !loading && <WelcomeMessage />}
-
-          {climateData && !loading && (
-            <>
-              <SafeComponent
-                component={RiskSummary}
-                fallbackName="RiskSummary"
-                data={climateData}
-                location={location}
-                date={selectedDate}
-              />
-
-              <div className="charts-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 my-6">
-                {parameters.map((param) => (
-                  <SafeComponent
-                    key={param}
-                    component={ProbabilityCharts}
-                    fallbackName="ProbabilityCharts"
-                    parameter={param}
-                    data={{ parameters: climateData }}
-                  />
-                ))}
+        <main className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+          {/* Controls Column */}
+          <aside className="lg:col-span-2 bg-white p-6 rounded-xl shadow-lg h-fit">
+            <h2 className="text-2xl font-semibold mb-4 text-gray-700">Controls</h2>
+            <div className="space-y-4">
+              <div>
+                <label className="font-medium text-gray-600 block mb-1">Top Cities</label>
+                <select value={selectedCity} onChange={handleCityChange} className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500">
+                  {TOP_CITIES.map(city => (
+                    <option key={city.name} value={JSON.stringify(city.coords)}>
+                      {city.name}
+                    </option>
+                  ))}
+                </select>
               </div>
+              <div>
+                <label className="font-medium text-gray-600 block mb-1">Date</label>
+                <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500" />
+              </div>
+            </div>
+            <div className="mt-6 h-80 w-full rounded-lg overflow-hidden border border-gray-200">
+              <Map center={location} zoom={5} onClick={handleMapClick}>
+                <Marker width={40} anchor={location} color="#1d4ed8" />
+              </Map>
+            </div>
+            <p className="text-center text-sm text-gray-500 mt-2">Click on the map to select a custom location</p>
+          </aside>
 
-              <SafeComponent
-                component={HistoricalTrends}
-                fallbackName="HistoricalTrends"
-                data={climateData.historicalTrends}
-                location={location}
-              />
-
-              <SafeComponent
-                component={DataExport}
-                fallbackName="DataExport"
-                data={climateData}
-                location={location}
-                date={selectedDate}
-                parameters={parameters}
-              />
-            </>
-          )}
+          {/* Results Column */}
+          <section className="lg:col-span-3 bg-white p-6 rounded-xl shadow-lg">
+            <h2 className="text-2xl font-semibold mb-4 text-gray-700">Analysis Results</h2>
+            {isLoading && <Loader />}
+            {error && !isLoading && <ErrorDisplay message={error} />}
+            {weatherData && !isLoading && <ResultsDisplay data={weatherData} />}
+          </section>
         </main>
       </div>
     </div>
   );
 }
 
-function WelcomeMessage() {
-  return (
-    <div className="welcome-message text-center p-12 bg-white rounded-lg shadow-md">
-      <h2 className="text-3xl font-semibold mb-6">Welcome to ClimateRisk Dashboard</h2>
-      <p className="text-gray-600 text-lg mb-10">
-        Select a location and parameters to analyze climate probabilities
-      </p>
-      <div className="welcome-steps grid grid-cols-1 sm:grid-cols-3 gap-8">
-        <div className="step p-6 bg-blue-100 rounded-lg">
-          <div className="text-4xl font-bold mb-3">1</div>
-          <h3 className="text-xl font-semibold mb-1">Choose Location</h3>
-          <p className="text-gray-700">Use map, search, or coordinates</p>
-        </div>
-        <div className="step p-6 bg-blue-100 rounded-lg">
-          <div className="text-4xl font-bold mb-3">2</div>
-          <h3 className="text-xl font-semibold mb-1">Select Parameters</h3>
-          <p className="text-gray-700">Pick weather variables to analyze</p>
-        </div>
-        <div className="step p-6 bg-blue-100 rounded-lg">
-          <div className="text-4xl font-bold mb-3">3</div>
-          <h3 className="text-xl font-semibold mb-1">Get Analysis</h3>
-          <p className="text-gray-700">View probability charts</p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export default DashboardPage;
+
